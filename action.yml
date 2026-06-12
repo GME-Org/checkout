@@ -98,6 +98,23 @@ inputs:
   github-server-url:
     description: The base URL for the GitHub instance that you are trying to clone from, will use environment defaults to fetch from the same instance that the workflow is running from unless specified. Example URLs are https://github.com or https://my-ghes-server.example.com
     required: false
+  lan-cache-api:
+    description: 'Optional LAN git cache API base URL. Empty disables LAN cache.'
+    required: false
+  lan-cache-git-base:
+    description: 'Optional LAN git cache git base URL, for example git://172.16.220.217. Empty disables LAN cache.'
+    required: false
+  lan-cache-ensure-endpoint:
+    description: 'LAN git cache API endpoint used before fetching the repository.'
+    default: /ensure-main
+    required: false
+  lan-cache-repository:
+    description: 'Repository name on the LAN git cache. Defaults to the repository name from the repository input.'
+    required: false
+  lan-cache-fallback:
+    description: 'Whether to retry the same checkout through GitHub when LAN cache fetch fails.'
+    default: true
+    required: false
 outputs:
   ref:
     description: 'The branch, tag or SHA that was checked out'

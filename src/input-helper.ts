@@ -161,5 +161,20 @@ export async function getInputs(): Promise<IGitSourceSettings> {
   result.githubServerUrl = core.getInput('github-server-url')
   core.debug(`GitHub Host URL = ${result.githubServerUrl}`)
 
+  // LAN git cache. Disabled by default to preserve standard checkout behavior.
+  result.lanCacheApi = core.getInput('lan-cache-api')
+  result.lanCacheGitBase = core.getInput('lan-cache-git-base')
+  result.lanCacheEnsureEndpoint =
+    core.getInput('lan-cache-ensure-endpoint') || '/ensure-main'
+  result.lanCacheRepository =
+    core.getInput('lan-cache-repository') || result.repositoryName
+  result.lanCacheFallback =
+    (core.getInput('lan-cache-fallback') || 'true').toUpperCase() === 'TRUE'
+  core.debug(`LAN cache API = ${result.lanCacheApi}`)
+  core.debug(`LAN cache git base = ${result.lanCacheGitBase}`)
+  core.debug(`LAN cache ensure endpoint = ${result.lanCacheEnsureEndpoint}`)
+  core.debug(`LAN cache repository = ${result.lanCacheRepository}`)
+  core.debug(`LAN cache fallback = ${result.lanCacheFallback}`)
+
   return result
 }

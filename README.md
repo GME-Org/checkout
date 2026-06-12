@@ -126,6 +126,25 @@ Please refer to the [release page](https://github.com/actions/checkout/releases/
     # running from unless specified. Example URLs are https://github.com or
     # https://my-ghes-server.example.com
     github-server-url: ''
+
+    # Optional LAN git cache API base URL. Empty disables LAN cache.
+    lan-cache-api: ''
+
+    # Optional LAN git cache git base URL, for example git://172.16.220.217. Empty
+    # disables LAN cache.
+    lan-cache-git-base: ''
+
+    # LAN git cache API endpoint used before fetching the repository.
+    # Default: /ensure-main
+    lan-cache-ensure-endpoint: ''
+
+    # Repository name on the LAN git cache. Defaults to the repository name from the
+    # repository input.
+    lan-cache-repository: ''
+
+    # Whether to retry the same checkout through GitHub when LAN cache fetch fails.
+    # Default: true
+    lan-cache-fallback: ''
 ```
 <!-- end usage -->
 

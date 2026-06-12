@@ -824,7 +824,12 @@ async function setup(testName: string): Promise<void> {
     sshUser: '',
     workflowOrganizationId: 123456,
     setSafeDirectory: true,
-    githubServerUrl: githubServerUrl
+    githubServerUrl: githubServerUrl,
+    lanCacheApi: '',
+    lanCacheGitBase: '',
+    lanCacheEnsureEndpoint: '/ensure-main',
+    lanCacheRepository: 'my-repo',
+    lanCacheFallback: true
   }
 }
 

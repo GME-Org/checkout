@@ -118,4 +118,29 @@ export interface IGitSourceSettings {
    * User override on the GitHub Server/Host URL that hosts the repository to be cloned
    */
   githubServerUrl: string | undefined
+
+  /**
+   * LAN git cache API base URL. Empty disables LAN cache.
+   */
+  lanCacheApi: string
+
+  /**
+   * LAN git cache git protocol base URL. For example, git://172.16.220.217
+   */
+  lanCacheGitBase: string
+
+  /**
+   * LAN git cache ensure endpoint path.
+   */
+  lanCacheEnsureEndpoint: string
+
+  /**
+   * Repository name on the LAN git cache. Defaults to repositoryName.
+   */
+  lanCacheRepository: string
+
+  /**
+   * Whether to retry the same checkout through GitHub when LAN cache fetch fails.
+   */
+  lanCacheFallback: boolean
 }

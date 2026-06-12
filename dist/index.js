@@ -1172,6 +1172,8 @@ const gitAuthHelper = __importStar(__nccwpck_require__(2565));
 const gitCommandManager = __importStar(__nccwpck_require__(738));
 const gitDirectoryHelper = __importStar(__nccwpck_require__(8609));
 const githubApiHelper = __importStar(__nccwpck_require__(138));
+const http = __importStar(__nccwpck_require__(3685));
+const https = __importStar(__nccwpck_require__(5687));
 const io = __importStar(__nccwpck_require__(7436));
 const path = __importStar(__nccwpck_require__(1017));
 const refHelper = __importStar(__nccwpck_require__(8601));
@@ -1180,6 +1182,7 @@ const urlHelper = __importStar(__nccwpck_require__(9437));
 const git_command_manager_1 = __nccwpck_require__(738);
 function getSource(settings) {
     return __awaiter(this, void 0, void 0, function* () {
+        var _a;
         // Repository URL
         core.info(`Syncing repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
         const repositoryUrl = urlHelper.getFetchUrl(settings);
@@ -1269,31 +1272,22 @@ function getSource(settings) {
             if (settings.lfs) {
                 yield git.lfsInstall();
             }
+            const lanCache = yield configureLanCache(settings, git, authHelper);
             // Fetch
             core.startGroup('Fetching the repository');
-            const fetchOptions = {};
-            if (settings.filter) {
-                fetchOptions.filter = settings.filter;
+            try {
+                yield fetchRepository(git, settings);
             }
-            else if (settings.sparseCheckout) {
-                fetchOptions.filter = 'blob:none';
-            }
-            if (settings.fetchDepth <= 0) {
-                // Fetch all branches and tags
-                let refSpec = refHelper.getRefSpecForAllHistory(settings.ref, settings.commit);
-                yield git.fetch(refSpec, fetchOptions);
-                // When all history is fetched, the ref we're interested in may have moved to a different
-                // commit (push or force push). If so, fetch again with a targeted refspec.
-                if (!(yield refHelper.testRef(git, settings.ref, settings.commit))) {
-                    refSpec = refHelper.getRefSpec(settings.ref, settings.commit);
-                    yield git.fetch(refSpec, fetchOptions);
+            catch (error) {
+                if (!lanCache.enabled || !settings.lanCacheFallback) {
+                    throw error;
                 }
+                core.warning(`LAN cache fetch failed, retrying through GitHub origin. ${(_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error}`);
+                yield lanCache.disable();
+                yield fetchRepository(git, settings);
             }
-            else {
-                fetchOptions.fetchDepth = settings.fetchDepth;
-                fetchOptions.fetchTags = settings.fetchTags;
-                const refSpec = refHelper.getRefSpec(settings.ref, settings.commit);
-                yield git.fetch(refSpec, fetchOptions);
+            finally {
+                yield lanCache.disable();
             }
             core.endGroup();
             // Checkout info
@@ -1369,6 +1363,136 @@ function getSource(settings) {
                 authHelper.removeGlobalConfig();
             }
         }
+    });
+}
+function fetchRepository(git, settings) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const fetchOptions = {};
+        if (settings.filter) {
+            fetchOptions.filter = settings.filter;
+        }
+        else if (settings.sparseCheckout) {
+            fetchOptions.filter = 'blob:none';
+        }
+        if (settings.fetchDepth <= 0) {
+            // Fetch all branches and tags
+            let refSpec = refHelper.getRefSpecForAllHistory(settings.ref, settings.commit);
+            yield git.fetch(refSpec, fetchOptions);
+            // When all history is fetched, the ref we're interested in may have moved to a different
+            // commit (push or force push). If so, fetch again with a targeted refspec.
+            if (!(yield refHelper.testRef(git, settings.ref, settings.commit))) {
+                refSpec = refHelper.getRefSpec(settings.ref, settings.commit);
+                yield git.fetch(refSpec, fetchOptions);
+            }
+        }
+        else {
+            fetchOptions.fetchDepth = settings.fetchDepth;
+            fetchOptions.fetchTags = settings.fetchTags;
+            const refSpec = refHelper.getRefSpec(settings.ref, settings.commit);
+            yield git.fetch(refSpec, fetchOptions);
+        }
+    });
+}
+function configureLanCache(settings, git, authHelper) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const disabled = {
+            enabled: false,
+            disable: () => __awaiter(this, void 0, void 0, function* () { })
+        };
+        if (!settings.lanCacheApi || !settings.lanCacheGitBase) {
+            return disabled;
+        }
+        const cacheGitUrl = getLanCacheGitUrl(settings);
+        const insteadOfKey = `url.${cacheGitUrl}.insteadOf`;
+        try {
+            yield ensureLanCache(settings);
+            // Reuse checkout's temporary global config mechanism. This writes only to
+            // RUNNER_TEMP/HOME for this action's git commands, not the runner user's
+            // real global git config.
+            yield authHelper.configureTempGlobalConfig();
+            yield git.tryConfigUnset(insteadOfKey, true);
+            for (const value of getLanCacheInsteadOfValues(settings)) {
+                yield git.config(insteadOfKey, value, true, true);
+            }
+            core.info(`LAN git cache enabled for ${settings.repositoryOwner}/${settings.repositoryName}: ${cacheGitUrl}`);
+            return {
+                enabled: true,
+                disable: () => __awaiter(this, void 0, void 0, function* () {
+                    yield git.tryConfigUnset(insteadOfKey, true);
+                })
+            };
+        }
+        catch (error) {
+            yield git.tryConfigUnset(insteadOfKey, true);
+            core.info(`LAN git cache unavailable, using GitHub origin. ${(_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error}`);
+            return disabled;
+        }
+    });
+}
+function getLanCacheGitUrl(settings) {
+    const base = settings.lanCacheGitBase.replace(/\/+$/, '');
+    const repo = settings.lanCacheRepository.endsWith('.git')
+        ? settings.lanCacheRepository
+        : `${settings.lanCacheRepository}.git`;
+    return `${base}/${repo}`;
+}
+function getLanCacheInsteadOfValues(settings) {
+    const serverUrl = urlHelper.getServerUrl(settings.githubServerUrl);
+    const repo = `${settings.repositoryOwner}/${settings.repositoryName}`;
+    return [
+        `${serverUrl.origin}/${repo}.git`,
+        `${serverUrl.origin}/${repo}`,
+        `git@${serverUrl.hostname}:${repo}.git`,
+        `git@${serverUrl.hostname}:${repo}`
+    ];
+}
+function ensureLanCache(settings) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const apiBase = settings.lanCacheApi.replace(/\/+$/, '');
+        const endpoint = settings.lanCacheEnsureEndpoint.startsWith('/')
+            ? settings.lanCacheEnsureEndpoint
+            : `/${settings.lanCacheEnsureEndpoint}`;
+        yield requestLanCache(`${apiBase}/health`, 'GET');
+        yield requestLanCache(`${apiBase}${endpoint}`, 'POST', '{}');
+    });
+}
+function requestLanCache(requestUrl, method, body) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const url = new URL(requestUrl);
+        const client = url.protocol === 'https:' ? https : http;
+        yield new Promise((resolve, reject) => {
+            const req = client.request(url, {
+                method,
+                timeout: 3600000,
+                headers: body
+                    ? {
+                        'content-type': 'application/json',
+                        'content-length': Buffer.byteLength(body).toString()
+                    }
+                    : undefined
+            }, res => {
+                const chunks = [];
+                res.on('data', chunk => chunks.push(Buffer.from(chunk)));
+                res.on('end', () => {
+                    const responseBody = Buffer.concat(chunks).toString('utf8');
+                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                        resolve();
+                    }
+                    else {
+                        reject(new Error(`${method} ${requestUrl} failed with status ${res.statusCode}: ${responseBody.slice(0, 1000)}`));
+                    }
+                });
+            });
+            req.on('timeout', () => {
+                req.destroy(new Error(`${method} ${requestUrl} timed out`));
+            });
+            req.on('error', reject);
+            if (body) {
+                req.write(body);
+            }
+            req.end();
+        });
     });
 }
 function cleanup(repositoryPath) {
@@ -1737,8 +1861,14 @@ function getInputs() {
         // Repository path
         result.repositoryPath = core.getInput('path') || '.';
         result.repositoryPath = path.resolve(githubWorkspacePath, result.repositoryPath);
-        // if (!(result.repositoryPath + path.sep).startsWith(githubWorkspacePath + path.sep)) {
-        //     throw new Error(`Repository path '${result.repositoryPath}' is not under '${githubWorkspacePath}'`);
+        // if (
+        //   !(result.repositoryPath + path.sep).startsWith(
+        //     githubWorkspacePath + path.sep
+        //   )
+        // ) {
+        //   throw new Error(
+        //     `Repository path '${result.repositoryPath}' is not under '${githubWorkspacePath}'`
+        //   )
         // }
         // Workflow repository?
         const isWorkflowRepository = qualifiedRepository.toUpperCase() ===
@@ -1831,6 +1961,20 @@ function getInputs() {
         // Determine the GitHub URL that the repository is being hosted from
         result.githubServerUrl = core.getInput('github-server-url');
         core.debug(`GitHub Host URL = ${result.githubServerUrl}`);
+        // LAN git cache. Disabled by default to preserve standard checkout behavior.
+        result.lanCacheApi = core.getInput('lan-cache-api');
+        result.lanCacheGitBase = core.getInput('lan-cache-git-base');
+        result.lanCacheEnsureEndpoint =
+            core.getInput('lan-cache-ensure-endpoint') || '/ensure-main';
+        result.lanCacheRepository =
+            core.getInput('lan-cache-repository') || result.repositoryName;
+        result.lanCacheFallback =
+            (core.getInput('lan-cache-fallback') || 'true').toUpperCase() === 'TRUE';
+        core.debug(`LAN cache API = ${result.lanCacheApi}`);
+        core.debug(`LAN cache git base = ${result.lanCacheGitBase}`);
+        core.debug(`LAN cache ensure endpoint = ${result.lanCacheEnsureEndpoint}`);
+        core.debug(`LAN cache repository = ${result.lanCacheRepository}`);
+        core.debug(`LAN cache fallback = ${result.lanCacheFallback}`);
         return result;
     });
 }

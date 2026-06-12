@@ -4,6 +4,8 @@ import * as gitAuthHelper from './git-auth-helper'
 import * as gitCommandManager from './git-command-manager'
 import * as gitDirectoryHelper from './git-directory-helper'
 import * as githubApiHelper from './github-api-helper'
+import * as http from 'http'
+import * as https from 'https'
 import * as io from '@actions/io'
 import * as path from 'path'
 import * as refHelper from './ref-helper'
@@ -154,42 +156,29 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
       await git.lfsInstall()
     }
 
+    const lanCache = await configureLanCache(settings, git, authHelper)
+
     // Fetch
     core.startGroup('Fetching the repository')
-    const fetchOptions: {
-      filter?: string
-      fetchDepth?: number
-      fetchTags?: boolean
-      showProgress?: boolean
-    } = {}
-
-    if (settings.filter) {
-      fetchOptions.filter = settings.filter
-    } else if (settings.sparseCheckout) {
-      fetchOptions.filter = 'blob:none'
-    }
-
-    if (settings.fetchDepth <= 0) {
-      // Fetch all branches and tags
-      let refSpec = refHelper.getRefSpecForAllHistory(
-        settings.ref,
-        settings.commit
-      )
-      await git.fetch(refSpec, fetchOptions)
-
-      // When all history is fetched, the ref we're interested in may have moved to a different
-      // commit (push or force push). If so, fetch again with a targeted refspec.
-      if (!(await refHelper.testRef(git, settings.ref, settings.commit))) {
-        refSpec = refHelper.getRefSpec(settings.ref, settings.commit)
-        await git.fetch(refSpec, fetchOptions)
+    try {
+      await fetchRepository(git, settings)
+    } catch (error) {
+      if (!lanCache.enabled || !settings.lanCacheFallback) {
+        throw error
       }
-    } else {
-      fetchOptions.fetchDepth = settings.fetchDepth
-      fetchOptions.fetchTags = settings.fetchTags
-      const refSpec = refHelper.getRefSpec(settings.ref, settings.commit)
-      await git.fetch(refSpec, fetchOptions)
+
+      core.warning(
+        `LAN cache fetch failed, retrying through GitHub origin. ${
+          (error as any)?.message ?? error
+        }`
+      )
+      await lanCache.disable()
+      await fetchRepository(git, settings)
+    } finally {
+      await lanCache.disable()
     }
     core.endGroup()
+
 
     // Checkout info
     core.startGroup('Determining the checkout info')
@@ -285,6 +274,178 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
       authHelper.removeGlobalConfig()
     }
   }
+}
+
+async function fetchRepository(
+  git: IGitCommandManager,
+  settings: IGitSourceSettings
+): Promise<void> {
+  const fetchOptions: {
+    filter?: string
+    fetchDepth?: number
+    fetchTags?: boolean
+    showProgress?: boolean
+  } = {}
+
+  if (settings.filter) {
+    fetchOptions.filter = settings.filter
+  } else if (settings.sparseCheckout) {
+    fetchOptions.filter = 'blob:none'
+  }
+
+  if (settings.fetchDepth <= 0) {
+    // Fetch all branches and tags
+    let refSpec = refHelper.getRefSpecForAllHistory(
+      settings.ref,
+      settings.commit
+    )
+    await git.fetch(refSpec, fetchOptions)
+
+    // When all history is fetched, the ref we're interested in may have moved to a different
+    // commit (push or force push). If so, fetch again with a targeted refspec.
+    if (!(await refHelper.testRef(git, settings.ref, settings.commit))) {
+      refSpec = refHelper.getRefSpec(settings.ref, settings.commit)
+      await git.fetch(refSpec, fetchOptions)
+    }
+  } else {
+    fetchOptions.fetchDepth = settings.fetchDepth
+    fetchOptions.fetchTags = settings.fetchTags
+    const refSpec = refHelper.getRefSpec(settings.ref, settings.commit)
+    await git.fetch(refSpec, fetchOptions)
+  }
+}
+
+async function configureLanCache(
+  settings: IGitSourceSettings,
+  git: IGitCommandManager,
+  authHelper: gitAuthHelper.IGitAuthHelper
+): Promise<{enabled: boolean; disable: () => Promise<void>}> {
+  const disabled = {
+    enabled: false,
+    disable: async () => {}
+  }
+
+  if (!settings.lanCacheApi || !settings.lanCacheGitBase) {
+    return disabled
+  }
+
+  const cacheGitUrl = getLanCacheGitUrl(settings)
+  const insteadOfKey = `url.${cacheGitUrl}.insteadOf`
+
+  try {
+    await ensureLanCache(settings)
+
+    // Reuse checkout's temporary global config mechanism. This writes only to
+    // RUNNER_TEMP/HOME for this action's git commands, not the runner user's
+    // real global git config.
+    await authHelper.configureTempGlobalConfig()
+    await git.tryConfigUnset(insteadOfKey, true)
+
+    for (const value of getLanCacheInsteadOfValues(settings)) {
+      await git.config(insteadOfKey, value, true, true)
+    }
+
+    core.info(
+      `LAN git cache enabled for ${settings.repositoryOwner}/${settings.repositoryName}: ${cacheGitUrl}`
+    )
+
+    return {
+      enabled: true,
+      disable: async () => {
+        await git.tryConfigUnset(insteadOfKey, true)
+      }
+    }
+  } catch (error) {
+    await git.tryConfigUnset(insteadOfKey, true)
+    core.info(
+      `LAN git cache unavailable, using GitHub origin. ${
+        (error as any)?.message ?? error
+      }`
+    )
+    return disabled
+  }
+}
+
+function getLanCacheGitUrl(settings: IGitSourceSettings): string {
+  const base = settings.lanCacheGitBase.replace(/\/+$/, '')
+  const repo = settings.lanCacheRepository.endsWith('.git')
+    ? settings.lanCacheRepository
+    : `${settings.lanCacheRepository}.git`
+  return `${base}/${repo}`
+}
+
+function getLanCacheInsteadOfValues(settings: IGitSourceSettings): string[] {
+  const serverUrl = urlHelper.getServerUrl(settings.githubServerUrl)
+  const repo = `${settings.repositoryOwner}/${settings.repositoryName}`
+  return [
+    `${serverUrl.origin}/${repo}.git`,
+    `${serverUrl.origin}/${repo}`,
+    `git@${serverUrl.hostname}:${repo}.git`,
+    `git@${serverUrl.hostname}:${repo}`
+  ]
+}
+
+async function ensureLanCache(settings: IGitSourceSettings): Promise<void> {
+  const apiBase = settings.lanCacheApi.replace(/\/+$/, '')
+  const endpoint = settings.lanCacheEnsureEndpoint.startsWith('/')
+    ? settings.lanCacheEnsureEndpoint
+    : `/${settings.lanCacheEnsureEndpoint}`
+
+  await requestLanCache(`${apiBase}/health`, 'GET')
+  await requestLanCache(`${apiBase}${endpoint}`, 'POST', '{}')
+}
+
+async function requestLanCache(
+  requestUrl: string,
+  method: 'GET' | 'POST',
+  body?: string
+): Promise<void> {
+  const url = new URL(requestUrl)
+  const client = url.protocol === 'https:' ? https : http
+
+  await new Promise<void>((resolve, reject) => {
+    const req = client.request(
+      url,
+      {
+        method,
+        timeout: 3600_000,
+        headers: body
+          ? {
+              'content-type': 'application/json',
+              'content-length': Buffer.byteLength(body).toString()
+            }
+          : undefined
+      },
+      res => {
+        const chunks: Buffer[] = []
+        res.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        res.on('end', () => {
+          const responseBody = Buffer.concat(chunks).toString('utf8')
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            resolve()
+          } else {
+            reject(
+              new Error(
+                `${method} ${requestUrl} failed with status ${
+                  res.statusCode
+                }: ${responseBody.slice(0, 1000)}`
+              )
+            )
+          }
+        })
+      }
+    )
+
+    req.on('timeout', () => {
+      req.destroy(new Error(`${method} ${requestUrl} timed out`))
+    })
+    req.on('error', reject)
+
+    if (body) {
+      req.write(body)
+    }
+    req.end()
+  })
 }
 
 export async function cleanup(repositoryPath: string): Promise<void> {
