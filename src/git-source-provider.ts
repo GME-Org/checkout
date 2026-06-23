@@ -408,7 +408,7 @@ async function requestLanCache(
       url,
       {
         method,
-        timeout: 3600_000,
+        timeout: 600_000,
         headers: body
           ? {
               'content-type': 'application/json',

@@ -1464,7 +1464,7 @@ function requestLanCache(requestUrl, method, body) {
         yield new Promise((resolve, reject) => {
             const req = client.request(url, {
                 method,
-                timeout: 3600000,
+                timeout: 600000,
                 headers: body
                     ? {
                         'content-type': 'application/json',
